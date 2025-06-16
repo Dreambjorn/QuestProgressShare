@@ -1,9 +1,7 @@
+local QPS = QuestProgressShare
 -- Core.lua - Main logic for QuestProgressShare
 
-local QPS = QuestProgressShare -- main addon table
-
 QPS.suppressQuestLogUpdate = false -- prevent recursive or premature quest log updates
-
 local lastProgress = {} -- last known progress for each quest objective
 local completedQuestTitle = nil -- quest being turned in (for completion detection)
 local delayedQuestScanPending = false -- is a delayed scan scheduled
@@ -30,12 +28,123 @@ end
 
 delayedQuestScanFrame:SetScript("OnUpdate", DelayedQuestScanOnUpdate)
 
+local getQuestIDs = pfDatabase and pfDatabase.GetQuestIDs
+local pfDB = pfDB
+
+-- Helper to get a clickable quest link for chat (supports pfQuest, pfQuest-turtle, and locale-based tables)
+local function GetClickableQuestLink(questID, title)
+    local qid = tostring(questID)
+    local qid_num = tonumber(questID)
+    local locale = GetLocale and GetLocale() or "enUS"
+    local pfquests = pfDB and pfDB["quests"]
+    local pfdbs = {
+        { data = pfquests and pfquests["data"], loc = pfquests and pfquests["loc"] }, -- pfQuest legacy
+        { data = pfquests and pfquests["data-turtle"], loc = pfquests and pfquests[locale.."-turtle"] }, -- pfQuest-turtle
+        { data = pfquests and pfquests["data"], loc = pfquests and pfquests[locale] } -- pfQuest modern locale
+    }
+    local foundData, foundLoc, foundType
+    for i, db in ipairs(pfdbs) do
+        if db.data and db.loc then
+            local data = db.data[qid] or (qid_num and db.data[qid_num])
+            local loc = db.loc[qid] or (qid_num and db.loc[qid_num])
+            if data or loc then
+                foundData, foundLoc = data, loc
+                foundType = (i == 1 and "pfQuest-loc") or (i == 2 and "pfQuest-turtle") or (i == 3 and "pfQuest-locale")
+                break
+            end
+        end
+    end
+    local link
+    if foundData or foundLoc then
+        local level = foundData and foundData["lvl"] or 0
+        local name = foundLoc and foundLoc["T"] or (foundData and foundData["T"] or ("Quest "..qid))
+        local hex = "|cffffff00"
+        if pfUI and pfUI.api and pfUI.api.rgbhex and pfQuestCompat and pfQuestCompat.GetDifficultyColor then
+            hex = pfUI.api.rgbhex(pfQuestCompat.GetDifficultyColor(level))
+        end
+        link = hex .. "|Hquest:"..qid..":"..level.."|h["..name.."]|h|r"
+    elseif questID and tonumber(questID) then
+        local safeTitle = (type(title) == "string" and title) or ("Quest "..tostring(questID))
+        local cleanTitle = StringLib.Gsub(safeTitle, "|", "")
+        local hex = "|cffffff00"
+        if pfUI and pfUI.api and pfUI.api.rgbhex and pfQuestCompat and pfQuestCompat.GetDifficultyColor then
+            hex = pfUI.api.rgbhex(pfQuestCompat.GetDifficultyColor(0))
+        end
+        link = hex .. "|Hquest:"..tostring(questID)..":0|h["..cleanTitle.."]|h|r"
+    elseif type(title) == "string" and StringLib.Sub(title, 1, 8) == "|Hquest:" then
+        if StringLib.Sub(title, 1, 10) ~= "|cffffff00" then
+            link = "|cffffff00" .. title .. "|r"
+        else
+            link = title
+        end
+    elseif type(title) == "string" then
+        local safeTitle = StringLib.Gsub(title, "|", "")
+        link = "[" .. safeTitle .. "]"
+    else
+        link = qid
+    end
+    if type(link) == "string" and StringLib.Sub(link, 1, 8) == "|Hquest:" then
+        if StringLib.Sub(link, 1, 10) ~= "|cffffff00" then
+            link = "|cffffff00" .. link .. "|r"
+        end
+    end
+    return link
+end
+
+-- Helper: robust quest log index validation for pfQuest
+local function IsValidQuestLogIndex(index)
+    if type(index) ~= "number" or index < 1 or index > GetNumQuestLogEntries() then return false end
+    local title, _, _, isHeader = GetQuestLogTitle(index)
+    return (not isHeader) and title and title ~= ""
+end
+
+-- Cache for SafeGetQuestIDs results per scan
+local questIDCache = {}
+
+-- Helper: safe pfQuest GetQuestIDs call, with fallback
+local function SafeGetQuestIDs(index, title)
+    if questIDCache[index] ~= nil then
+        return questIDCache[index]
+    end
+    if not IsValidQuestLogIndex(index) then
+        questIDCache[index] = nil
+        return nil
+    end
+    if getQuestIDs then
+        local ok, ids = pcall(getQuestIDs, index)
+        if ok and ids and ids[1] then
+            questIDCache[index] = ids
+            return ids
+        else
+            local logTitle = GetQuestLogTitle(index)
+            if title and logTitle and logTitle == title and pfDB and pfDB["quests"] and pfDB["quests"]["loc"] then
+                for id, data in pairs(pfDB["quests"]["loc"]) do
+                    if data.T == title then
+                        questIDCache[index] = { tonumber(id) }
+                        return questIDCache[index]
+                    end
+                end
+            end
+        end
+    end
+    questIDCache[index] = nil
+    return nil
+end
+
 -- Dummy scan to populate lastProgress without sending messages
 local function DummyQuestProgressScan()
     for questIndex = 1, GetNumQuestLogEntries() do
         local title, _, _, isHeader, _, _, isComplete = GetQuestLogTitle(questIndex)
-        if not isHeader then
-            SelectQuestLogEntry(questIndex)
+        if not isHeader and title and IsValidQuestLogIndex(questIndex) then
+            if pfDB then
+                local ids = SafeGetQuestIDs(questIndex, title)
+                local questID = ids and ids[1] and tonumber(ids[1])
+                if questID then
+                    SelectQuestLogEntry(questIndex)
+                end
+            else
+                SelectQuestLogEntry(questIndex)
+            end
             local objectives = GetNumQuestLeaderBoards()
             -- Handle turn-in only quests (no objectives)
             if objectives == 0 and isComplete then
@@ -68,6 +177,56 @@ local function ExtractQuestTitleFromKey(key)
     return nil
 end
 
+-- Helper: find questID by title in pfQuest DB
+local function FindQuestIDByTitle(title)
+    if pfDB and pfDB.quests and pfDB.quests.loc then
+        for id, data in pairs(pfDB.quests.loc) do
+            if data.T == title then
+                return tonumber(id)
+            end
+        end
+    end
+    return nil
+end
+
+local function SendQuestMessage(title, text, finished, questIndex)
+    local questID = nil
+    if pfDB then
+        if questIndex then
+            local ids = SafeGetQuestIDs(questIndex, title)
+            if ids and ids[1] then
+                questID = ids[1]
+                -- Double-check: only send if the quest title for this questIndex matches pfQuest DB for this questID
+                local pfTitle = nil
+                if pfDB.quests and pfDB.quests.loc and pfDB.quests.loc[tostring(questID)] then
+                    pfTitle = pfDB.quests.loc[tostring(questID)].T
+                end
+                local logTitle = GetQuestLogTitle(questIndex)
+                if pfTitle and logTitle and pfTitle ~= logTitle then
+                    -- Mismatch: do not send
+                    return
+                end
+            else
+                questID = FindQuestIDByTitle(title)
+            end
+        else
+            questID = FindQuestIDByTitle(title)
+        end
+    elseif getQuestIDs then
+        local ids = getQuestIDs(title)
+        if ids and ids[1] then questID = ids[1] end
+    end
+    if pfDB and questID then
+        local link = GetClickableQuestLink(questID, title)
+        -- Accept any link containing |Hquest: as a clickable quest link
+        if link and type(link) == "string" and StringLib.Find(link, "|Hquest:") then
+            QPS.chatMessage.SendLink(link, text, finished)
+            return
+        end
+    end
+    QPS.chatMessage.Send(title, text, finished)
+end
+
 -- Handles quest progress tracking and event logic
 function OnEvent()
     -- Handles quest completion (quest turn-in window opened)
@@ -80,6 +239,9 @@ function OnEvent()
     -- Handles player login: initializes known quests and prints loaded message
     elseif event == "PLAYER_LOGIN" then
         if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage("|cffb48affQuestProgressShare|r loaded.") end
+        if pfDB then
+            if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage("|cffb48affQuestProgressShare: pfQuest integration enabled!|r") end
+        end
         if not QPS_SavedKnownQuests then QPS_SavedKnownQuests = {} end
         QPS.knownQuests = {}
         for k, v in pairs(QPS_SavedKnownQuests) do QPS.knownQuests[k] = v end
@@ -112,7 +274,7 @@ function OnEvent()
             end
         end)
         return
-        
+    
     -- Handles quest log updates: detects quest accept, completion, and progress
     elseif event == "QUEST_LOG_UPDATE" and QuestProgressShareConfig.enabled then
         -- Prevent recursive or premature updates
@@ -155,7 +317,7 @@ function OnEvent()
                 currentCount = currentCount + 1
                 if not previousQuests[title] then
                     foundNewQuest = true
-                    QPS.chatMessage.Send(title, "Quest accepted", false)
+                    SendQuestMessage(title, "Quest accepted", false)
                 end
             end
         end
@@ -174,7 +336,7 @@ function OnEvent()
                     local questKey = prevTitle .. "-COMPLETE"
                     if lastProgress[questKey] ~= "Quest completed" then
                         lastProgress[questKey] = "Quest completed"
-                        QPS.chatMessage.Send(prevTitle, "Quest completed", true)
+                        SendQuestMessage(prevTitle, "Quest completed", true)
                     end
                     completedQuestTitle = nil
                 end
@@ -192,64 +354,135 @@ function OnEvent()
         for k, v in pairs(currentQuests) do QPS_SavedKnownQuests[k] = v end
 
         -- Iterate through the quest log entries and announce progress/completion
-        for questIndex = 1, GetNumQuestLogEntries() do
-            local title, _, _, isHeader, _, _, isComplete = GetQuestLogTitle(questIndex)
-            if not isHeader then
-                SelectQuestLogEntry(questIndex)
-                local objectives = GetNumQuestLeaderBoards()
-                -- Handle turn-in only quests (no objectives)
-                if objectives == 0 and isComplete then
-                    local questKey = title .. "-COMPLETE"
-                    if lastProgress[questKey] ~= "Quest completed" then
-                        lastProgress[questKey] = "Quest completed"
-                        QPS.chatMessage.Send(title, "Quest completed", true)
+        if pfDB then
+            -- pfQuest enabled: only call SelectQuestLogEntry if we have a valid questID and valid index
+            for questIndex = 1, GetNumQuestLogEntries() do
+                local title, _, _, isHeader, _, _, isComplete = GetQuestLogTitle(questIndex)
+                if not isHeader and title and IsValidQuestLogIndex(questIndex) then
+                    local ids = SafeGetQuestIDs(questIndex, title)
+                    local questID = ids and ids[1] and tonumber(ids[1])
+                    if questID then
+                        SelectQuestLogEntry(questIndex)
                     end
-                end
-                local completedObjectives = 0
-                local totalObjectives = objectives
-                -- Check each quest objective for progress
-                for i = 1, objectives do
-                    local text, objType, finished = GetQuestLogLeaderBoard(i)
-                    local questKey = title .. "-" .. i
-                    local isMeaningless = false
-                    if type(text) ~= "string" then
-                        isMeaningless = true
-                    else
-                        local current, total = StringLib.SafeExtractNumbers(text, QPS_Debug)
-                        if not current or tonumber(current) == 0 then
-                            isMeaningless = true
-                        end
-                    end
-                    if isComplete then
+                    local objectives = GetNumQuestLeaderBoards()
+                    -- Handle turn-in only quests (no objectives)
+                    if objectives == 0 and isComplete then
+                        local questKey = title .. "-COMPLETE"
                         if lastProgress[questKey] ~= "Quest completed" then
                             lastProgress[questKey] = "Quest completed"
-                        end
-                    else
-                        if (lastProgress[questKey] == nil or lastProgress[questKey] == "") then
-                            if not isMeaningless and (QuestProgressShareConfig.sendStartingQuests or (type(text) == "string" and StringLib.Sub(text, 1, 3) ~= " : ")) then
-                                lastProgress[questKey] = text
-                                -- Only send if not first scan, or if changed since last session
-                                if (not firstProgressScan) or (QPS_SavedProgress[questKey] ~= text) then
-                                    if (finished or not QuestProgressShareConfig.sendOnlyFinished) and (not completedQuestTitle or completedQuestTitle ~= title) then
-                                        QPS.chatMessage.Send(title, text, finished)
-                                    end
-                                end
-                            end
-                        elseif lastProgress[questKey] ~= text then
-                            lastProgress[questKey] = text
-                            if not isMeaningless and (finished or not QuestProgressShareConfig.sendOnlyFinished) and (not completedQuestTitle or completedQuestTitle ~= title) then
-                                QPS.chatMessage.Send(title, text, finished)
-                            end
+                            SendQuestMessage(title, "Quest completed", true, questIndex)
                         end
                     end
-                    if finished then completedObjectives = completedObjectives + 1 end
+                    local completedObjectives = 0
+                    local totalObjectives = objectives
+                    -- Check each quest objective for progress
+                    for i = 1, objectives do
+                        local text, objType, finished = GetQuestLogLeaderBoard(i)
+                        local questKey = title .. "-" .. i
+                        local isMeaningless = false
+                        if type(text) ~= "string" then
+                            isMeaningless = true
+                        else
+                            local current, total = StringLib.SafeExtractNumbers(text, QPS_Debug)
+                            if not current or tonumber(current) == 0 then
+                                isMeaningless = true
+                            end
+                        end
+                        if isComplete then
+                            if lastProgress[questKey] ~= "Quest completed" then
+                                lastProgress[questKey] = "Quest completed"
+                            end
+                        else
+                            if (lastProgress[questKey] == nil or lastProgress[questKey] == "") then
+                                if not isMeaningless and (QuestProgressShareConfig.sendStartingQuests or (type(text) == "string" and StringLib.Sub(text, 1, 3) ~= " : ")) then
+                                    lastProgress[questKey] = text
+                                    -- Only send if not first scan, or if changed since last session
+                                    if (not firstProgressScan) or (QPS_SavedProgress[questKey] ~= text) then
+                                        if (finished or not QuestProgressShareConfig.sendOnlyFinished) and (not completedQuestTitle or completedQuestTitle ~= title) then
+                                            SendQuestMessage(title, text, finished, questIndex)
+                                        end
+                                    end
+                                end
+                            elseif lastProgress[questKey] ~= text then
+                                lastProgress[questKey] = text
+                                if not isMeaningless and (finished or not QuestProgressShareConfig.sendOnlyFinished) and (not completedQuestTitle or completedQuestTitle ~= title) then
+                                    SendQuestMessage(title, text, finished, questIndex)
+                                end
+                            end
+                        end
+                        if finished then completedObjectives = completedObjectives + 1 end
+                    end
+                    -- Send 'Quest completed' for all quest types (with or without objectives)
+                    if objectives > 0 then
+                        local questKey = title .. "-COMPLETE"
+                        if isComplete and lastProgress[questKey] ~= "Quest completed" then
+                            lastProgress[questKey] = "Quest completed"
+                            SendQuestMessage(title, "Quest completed", true, questIndex)
+                        end
+                    end
                 end
-                -- Send 'Quest completed' for all quest types (with or without objectives)
-                if objectives > 0 then
-                    local questKey = title .. "-COMPLETE"
-                    if isComplete and lastProgress[questKey] ~= "Quest completed" then
-                        lastProgress[questKey] = "Quest completed"
-                        QPS.chatMessage.Send(title, "Quest completed", true)
+            end
+        else
+            -- pfQuest not enabled: original logic
+            for questIndex = 1, GetNumQuestLogEntries() do
+                local title, _, _, isHeader, _, _, isComplete = GetQuestLogTitle(questIndex)
+                if not isHeader then
+                    SelectQuestLogEntry(questIndex)
+                    local objectives = GetNumQuestLeaderBoards()
+                    -- Handle turn-in only quests (no objectives)
+                    if objectives == 0 and isComplete then
+                        local questKey = title .. "-COMPLETE"
+                        if lastProgress[questKey] ~= "Quest completed" then
+                            lastProgress[questKey] = "Quest completed"
+                            SendQuestMessage(title, "Quest completed", true)
+                        end
+                    end
+                    local completedObjectives = 0
+                    local totalObjectives = objectives
+                    -- Check each quest objective for progress
+                    for i = 1, objectives do
+                        local text, objType, finished = GetQuestLogLeaderBoard(i)
+                        local questKey = title .. "-" .. i
+                        local isMeaningless = false
+                        if type(text) ~= "string" then
+                            isMeaningless = true
+                        else
+                            local current, total = StringLib.SafeExtractNumbers(text, QPS_Debug)
+                            if not current or tonumber(current) == 0 then
+                                isMeaningless = true
+                            end
+                        end
+                        if isComplete then
+                            if lastProgress[questKey] ~= "Quest completed" then
+                                lastProgress[questKey] = "Quest completed"
+                            end
+                        else
+                            if (lastProgress[questKey] == nil or lastProgress[questKey] == "") then
+                                if not isMeaningless and (QuestProgressShareConfig.sendStartingQuests or (type(text) == "string" and StringLib.Sub(text, 1, 3) ~= " : ")) then
+                                    lastProgress[questKey] = text
+                                    -- Only send if not first scan, or if changed since last session
+                                    if (not firstProgressScan) or (QPS_SavedProgress[questKey] ~= text) then
+                                        if (finished or not QuestProgressShareConfig.sendOnlyFinished) and (not completedQuestTitle or completedQuestTitle ~= title) then
+                                            SendQuestMessage(title, text, finished)
+                                        end
+                                    end
+                                end
+                            elseif lastProgress[questKey] ~= text then
+                                lastProgress[questKey] = text
+                                if not isMeaningless and (finished or not QuestProgressShareConfig.sendOnlyFinished) and (not completedQuestTitle or completedQuestTitle ~= title) then
+                                    SendQuestMessage(title, text, finished)
+                                end
+                            end
+                        end
+                        if finished then completedObjectives = completedObjectives + 1 end
+                    end
+                    -- Send 'Quest completed' for all quest types (with or without objectives)
+                    if objectives > 0 then
+                        local questKey = title .. "-COMPLETE"
+                        if isComplete and lastProgress[questKey] ~= "Quest completed" then
+                            lastProgress[questKey] = "Quest completed"
+                            SendQuestMessage(title, "Quest completed", true)
+                        end
                     end
                 end
             end
@@ -296,3 +529,4 @@ QPS:RegisterEvent("ADDON_LOADED")
 QPS:RegisterEvent("PLAYER_ENTERING_WORLD")
 QPS:RegisterEvent("QUEST_COMPLETE")
 QPS:SetScript("OnEvent", OnEvent)
+
