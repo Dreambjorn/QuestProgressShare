@@ -2,10 +2,11 @@
 ## Title: Quest Progress Share
 ## Notes: Sends a message to the party when you complete a quest.
 ## Author: GraveD89, Dreambjorn
-## Version: 1.2.0
+## Version: 1.2.1
 ## SavedVariablesPerCharacter: QPS_SavedKnownQuests
 ## SavedVariablesPerCharacter: QPS_SavedProgress
 ## SavedVariablesPerCharacter: QuestProgressShareConfig
+## SavedVariablesPerCharacter: QPS_SavedLoadCount
 
 Main.lua
 libs\ChatThrottleLib.lua

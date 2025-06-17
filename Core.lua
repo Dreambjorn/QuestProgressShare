@@ -1,3 +1,4 @@
+-- Reference to main addon table
 local QPS = QuestProgressShare
 -- Core.lua - Main logic for QuestProgressShare
 
@@ -7,17 +8,19 @@ local completedQuestTitle = nil -- quest being turned in (for completion detecti
 local delayedQuestScanPending = false -- is a delayed scan scheduled
 local delayedQuestScanFrame = CreateFrame("Frame") -- frame for delayed quest log scan
 local firstProgressScan = true -- is this the first scan after login/reload
+local getQuestIDs = pfDatabase and pfDatabase.GetQuestIDs -- Reference to pfQuest's GetQuestIDs function if available
+local pfDB = pfDB -- Reference to pfQuest's database table if available
 
 delayedQuestScanFrame:Hide()
 
--- Triggers a delayed scan of the quest log (used when headers may be collapsed)
+-- Schedules a delayed scan of the quest log, used to handle header state issues
 local function DelayedQuestLogScan()
     delayedQuestScanFrame:Hide()
     delayedQuestScanPending = false
     OnEvent("QUEST_LOG_UPDATE")
 end
 
--- OnUpdate handler for delayed quest log scan
+-- OnUpdate handler for the delayed quest scan frame
 local function DelayedQuestScanOnUpdate()
     delayedQuestScanFrame.elapsed = (delayedQuestScanFrame.elapsed or 0) + arg1
     if delayedQuestScanFrame.elapsed >= 0.3 then
@@ -28,10 +31,7 @@ end
 
 delayedQuestScanFrame:SetScript("OnUpdate", DelayedQuestScanOnUpdate)
 
-local getQuestIDs = pfDatabase and pfDatabase.GetQuestIDs
-local pfDB = pfDB
-
--- Helper to get a clickable quest link for chat (supports pfQuest, pfQuest-turtle, and locale-based tables)
+-- Returns a clickable quest link for chat, using pfQuest data if available
 local function GetClickableQuestLink(questID, title)
     local qid = tostring(questID)
     local qid_num = tonumber(questID)
@@ -91,7 +91,7 @@ local function GetClickableQuestLink(questID, title)
     return link
 end
 
--- Helper: robust quest log index validation for pfQuest
+-- Checks if a quest log index is valid and points to a real quest
 local function IsValidQuestLogIndex(index)
     if type(index) ~= "number" or index < 1 or index > GetNumQuestLogEntries() then return false end
     local title, _, _, isHeader = GetQuestLogTitle(index)
@@ -99,9 +99,9 @@ local function IsValidQuestLogIndex(index)
 end
 
 -- Cache for SafeGetQuestIDs results per scan
-local questIDCache = {}
+local questIDCache = {} -- [questLogIndex] = {questIDs}
 
--- Helper: safe pfQuest GetQuestIDs call, with fallback
+-- Safely retrieves quest IDs using pfQuest, with fallback and caching
 local function SafeGetQuestIDs(index, title)
     if questIDCache[index] ~= nil then
         return questIDCache[index]
@@ -131,7 +131,7 @@ local function SafeGetQuestIDs(index, title)
     return nil
 end
 
--- Dummy scan to populate lastProgress without sending messages
+-- Scans the quest log and updates lastProgress without sending messages
 local function DummyQuestProgressScan()
     for questIndex = 1, GetNumQuestLogEntries() do
         local title, _, _, isHeader, _, _, isComplete = GetQuestLogTitle(questIndex)
@@ -166,7 +166,7 @@ local function DummyQuestProgressScan()
     end
 end
 
--- Helper to extract quest title from progress key using StringLib
+-- Extracts the quest title from a progress key string
 local function ExtractQuestTitleFromKey(key)
     local len = StringLib.Len(key)
     for i = 1, len do
@@ -177,7 +177,7 @@ local function ExtractQuestTitleFromKey(key)
     return nil
 end
 
--- Helper: find questID by title in pfQuest DB
+-- Finds a quest ID by its title using pfQuest DB
 local function FindQuestIDByTitle(title)
     if pfDB and pfDB.quests and pfDB.quests.loc then
         for id, data in pairs(pfDB.quests.loc) do
@@ -189,6 +189,7 @@ local function FindQuestIDByTitle(title)
     return nil
 end
 
+-- Sends a quest progress or completion message, using clickable links if possible
 local function SendQuestMessage(title, text, finished, questIndex)
     local questID = nil
     if pfDB then
@@ -227,7 +228,12 @@ local function SendQuestMessage(title, text, finished, questIndex)
     QPS.chatMessage.Send(title, text, finished)
 end
 
--- Handles quest progress tracking and event logic
+-- Returns true if this is the first time the addon has ever loaded for this character
+local function IsFirstLoadEver()
+    return QPS_SavedLoadCount == 1
+end
+
+-- Main event handler for all registered events
 function OnEvent()
     -- Handles quest completion (quest turn-in window opened)
     if event == "QUEST_COMPLETE" then
@@ -238,18 +244,34 @@ function OnEvent()
 
     -- Handles player login: initializes known quests and prints loaded message
     elseif event == "PLAYER_LOGIN" then
-        if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage("|cffb48affQuestProgressShare|r loaded.") end
-        if pfDB then
-            if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage("|cffb48affQuestProgressShare: pfQuest integration enabled!|r") end
+        if DEFAULT_CHAT_FRAME then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffb48affQuestProgressShare|r loaded.")
         end
+        if pfDB then
+            if DEFAULT_CHAT_FRAME then
+                DEFAULT_CHAT_FRAME:AddMessage("|cffb48affQuestProgressShare: pfQuest integration enabled!|r")
+            end
+        end
+
+        -- Initialize known quests from SavedVariables
         if not QPS_SavedKnownQuests then QPS_SavedKnownQuests = {} end
         QPS.knownQuests = {}
         for k, v in pairs(QPS_SavedKnownQuests) do QPS.knownQuests[k] = v end
+
         -- Loads last progress from SavedVariables
         if not QPS_SavedProgress then QPS_SavedProgress = {} end
         for k, v in pairs(QPS_SavedProgress) do lastProgress[k] = v end
         firstProgressScan = true
-        DummyQuestProgressScan() -- Populates lastProgress for any new quests
+
+        -- Robust load count increment: only increment after login, and print for debugging
+        if QPS_SavedLoadCount == nil then QPS_SavedLoadCount = 0 end
+        QPS_SavedLoadCount = QPS_SavedLoadCount + 1
+
+        -- If first load ever, do a dummy scan and update saved variables, but do not send messages
+        QPS._didFirstLoadInit = false
+        if IsFirstLoadEver() then
+            QPS._didFirstLoadInit = true
+        end
         return
 
     -- Handles addon load: sets default config and updates config UI
@@ -271,10 +293,47 @@ function OnEvent()
             if (now - QPS.delayFrame.startTime) >= 3 then
                 QPS.ready = true
                 QPS.delayFrame:SetScript("OnUpdate", nil)
+
+                -- If first load ever, do a dummy scan and update saved variables, but do not send messages
+                if QPS._didFirstLoadInit then
+                    DummyQuestProgressScan()
+
+                    -- Save lastProgress to SavedVariables (clear old data first)
+                    if QPS_SavedProgress then
+                        for k in pairs(QPS_SavedProgress) do QPS_SavedProgress[k] = nil end
+                    else
+                        QPS_SavedProgress = {}
+                    end
+                    for k, v in pairs(lastProgress) do
+                        QPS_SavedProgress[k] = v
+                    end
+
+                    -- Also update known quests
+                    for questIndex = 1, GetNumQuestLogEntries() do
+                        local title, _, _, isHeader = GetQuestLogTitle(questIndex)
+                        if not isHeader and title then
+                            QPS.knownQuests[title] = true
+                        end
+                    end
+
+                    if QPS_SavedKnownQuests then
+                        for k in pairs(QPS_SavedKnownQuests) do QPS_SavedKnownQuests[k] = nil end
+                    else
+                        QPS_SavedKnownQuests = {}
+                    end
+                    for k, v in pairs(QPS.knownQuests) do
+                        QPS_SavedKnownQuests[k] = v
+                    end
+
+                    -- Mark first-load initialization as complete
+                    QPS._didFirstLoadInit = false
+                else
+                    DummyQuestProgressScan() -- Populates lastProgress for any new quests
+                end
             end
         end)
         return
-    
+
     -- Handles quest log updates: detects quest accept, completion, and progress
     elseif event == "QUEST_LOG_UPDATE" and QuestProgressShareConfig.enabled then
         -- Prevent recursive or premature updates
@@ -488,8 +547,7 @@ function OnEvent()
             end
         end
 
-        -- Save lastProgress to SavedVariables after each scan
-        -- Clean up progress for quests no longer in the log
+        -- Save lastProgress to SavedVariables and clean up progress for quests no longer in the log
         local activeQuestTitles = {}
         for questIndex = 1, GetNumQuestLogEntries() do
             local title, _, _, isHeader = GetQuestLogTitle(questIndex)
@@ -504,12 +562,14 @@ function OnEvent()
                 lastProgress[k] = nil
             end
         end
+
         if QPS_SavedProgress then
             for k in pairs(QPS_SavedProgress) do QPS_SavedProgress[k] = nil end
         else
             QPS_SavedProgress = {}
         end
         for k, v in pairs(lastProgress) do QPS_SavedProgress[k] = v end
+
         -- After first scan, set flag to false
         if firstProgressScan then firstProgressScan = false end
 
@@ -519,6 +579,7 @@ function OnEvent()
             if headerStates[i] then CollapseQuestHeader(i) end
         end
         QPS.suppressQuestLogUpdate = false
+
     end
 end
 
