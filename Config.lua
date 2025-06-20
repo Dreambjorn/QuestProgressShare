@@ -26,12 +26,16 @@ function QPS.config.SetDefaultConfigValues()
     if QuestProgressShareConfig.sendStartingQuests == nil then
         QuestProgressShareConfig.sendStartingQuests = false
     end
+
+    if QuestProgressShareConfig.debugEnabled == nil then
+        QuestProgressShareConfig.debugEnabled = false
+    end
 end
 
 -- Create the config frame
 QPS.configFrame = CreateFrame("Frame", "QuestProgressShareConfigFrame", UIParent)
 QPS.configFrame:SetWidth(300)
-QPS.configFrame:SetHeight(270)
+QPS.configFrame:SetHeight(300)
 QPS.configFrame:SetPoint("CENTER", 0, 0)
 QPS.configFrame:SetBackdrop({
     bgFile = "Interface/Tooltips/UI-Tooltip-Background",
@@ -135,6 +139,18 @@ local labelSendStartingQuests = QPS.configFrame:CreateFontString("QuestProgressS
 labelSendStartingQuests:SetPoint("LEFT", checkboxSendStartingQuests, "RIGHT", 10, 0)
 labelSendStartingQuests:SetText("Send starting quests")
 
+-- Checkbox for debug output
+local checkboxDebugEnabled = CreateFrame("CheckButton", "QuestProgressShareConfigDebugEnabledCheckbox", QPS.configFrame, "UICheckButtonTemplate")
+checkboxDebugEnabled:SetPoint("TOPLEFT", 20, -220)
+checkboxDebugEnabled:SetChecked(QuestProgressShareConfig.debugEnabled)
+checkboxDebugEnabled:SetScript("OnClick", function()
+    QuestProgressShareConfig.debugEnabled = checkboxDebugEnabled:GetChecked()
+end)
+
+local labelDebugEnabled = QPS.configFrame:CreateFontString("QuestProgressShareConfigDebugEnabledLabel", "OVERLAY", "GameFontNormal")
+labelDebugEnabled:SetPoint("LEFT", checkboxDebugEnabled, "RIGHT", 10, 0)
+labelDebugEnabled:SetText("Enable debug logging")
+
 -- Update the config options when the frame is shown
 QPS.configFrame:SetScript("OnShow", function()
     UpdateConfigFrame()
@@ -147,6 +163,7 @@ function UpdateConfigFrame()
     checkboxSendPublic:SetChecked(QuestProgressShareConfig.sendPublic)
     checkboxSendOnlyFinished:SetChecked(QuestProgressShareConfig.sendOnlyFinished)
     checkboxSendStartingQuests:SetChecked(QuestProgressShareConfig.sendStartingQuests)
+    checkboxDebugEnabled:SetChecked(QuestProgressShareConfig.debugEnabled)
 end
 
 -- Close-Button
