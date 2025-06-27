@@ -32,7 +32,6 @@ If you have any feature requests, please let me know [here](https://github.com/D
     - Quest log entries - Display party member progress for the same quest when hovering over quest log titles
     - Tracker entries - Show party member progress in pfQuest tracker tooltips when available
     - World objects/mobs - View party progress for quest-related entities when hovering over them in the world
-- **pfQuest integration** - Enhanced tooltip experience when pfQuest is available, with automatic fallback
 
 ## Changelog
 
