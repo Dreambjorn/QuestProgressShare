@@ -1,6 +1,5 @@
 # QuestProgressShare
-This AddOn sends quest progress to other players.
-If you are playing with friends and want to share your quest progress, this AddOn is for you.  
+Automatically syncs quest progress with your party in real time. Designed for smoother and more coordinated group questing without the need for manual updates or chat messages. 
   
 If you encounter any issues or errors, please report them in the [bugtracker](https://github.com/Dreambjorn/QuestProgressShare/issues).
 
